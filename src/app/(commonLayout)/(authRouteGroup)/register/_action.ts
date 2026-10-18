@@ -35,6 +35,11 @@ export const registerAction = async (payload: IRegisterPayload) => {
         if (response?.data?.token) {
             await setTokenInCookies("better-auth.session_token", response.data.token, 24 * 60 * 60);
         }
+        return {
+            success: true,
+            message: "Registration successful",
+            redirectUrl: "/dashboard",
+        };
     } catch (error: any) {
         console.error("Registration error:", error?.response?.data || error.message);
         return {
@@ -42,6 +47,4 @@ export const registerAction = async (payload: IRegisterPayload) => {
             message: error?.response?.data?.message || "Registration failed. Please try again.",
         };
     }
-
-    redirect("/dashboard");
 };

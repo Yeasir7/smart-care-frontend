@@ -34,11 +34,12 @@ const RegisterForm = () => {
             setServerError(null);
             try {
                 const result = (await mutateAsync(value as IRegisterPayload)) as any;
-                if (result && !result.success) {
-                    setServerError(result.message || "Registration failed");
+                if (!result || !result.success) {
+                    setServerError(result?.message || "Registration failed");
                     return;
                 }
                 toast.success("Registration successful!");
+                window.location.href = result.redirectUrl || "/dashboard";
             } catch (error: any) {
                 setServerError(`Registration failed: ${error.message}`);
             }

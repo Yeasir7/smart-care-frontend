@@ -39,13 +39,19 @@ const LoginForm = ({ redirectPath }: LoginFormProps) => {
             try {
                 const result = await mutateAsync(value) as any;
 
-                if(!result.success ){
-                    setServerError(result.message || "Login failed");
-                    return ;
+                if(!result || !result.success ){
+                    if (result?.redirectUrl) {
+                        toast.error(result.message || "Email not verified");
+                        window.location.href = result.redirectUrl;
+                        return;
+                    }
+                    setServerError(result?.message || "Login failed");
+                    return;
                 }
                 toast.success("Login successful!");
+                window.location.href = result.redirectUrl || "/dashboard";
             } catch (error : any) {
-                console.log(`Login failed: ${error.message}`);
+                console.error(`Login failed: ${error.message}`);
                 setServerError(`Login failed: ${error.message}`);
             }
         }
