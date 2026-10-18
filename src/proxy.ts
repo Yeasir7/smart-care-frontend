@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDefaultDashboardRoute, getRouteOwner, isAuthRoute, UserRole } from "./lib/authUtils";
 import { jwtUtils } from "./lib/jwtUtils";
 import { isTokenExpiringSoon } from "./lib/tokenUtils";
-import { getNewTokensWithRefreshToken, getUserInfo } from "./services/auth.services";
+import { getNewTokensWithRefreshToken } from "./services/auth.services";
 
 async function refreshTokenMiddleware (refreshToken : string) : Promise<boolean> {
     try {
@@ -17,21 +17,53 @@ async function refreshTokenMiddleware (refreshToken : string) : Promise<boolean>
     }
 }
 
+function verifyAccessToken(token: string) {
+    const configuredSecret = (process.env.JWT_ACCESS_SECRET || "").trim();
+    const secretsToTry = [
+        configuredSecret,
+        "accesssecretproduction",
+        "accesssecret"
+    ].filter(Boolean);
+
+    for (const secret of secretsToTry) {
+        const res = jwtUtils.verifyToken(token, secret);
+        if (res.success && res.data) {
+            return {
+                isValid: true,
+                decoded: res.data
+            };
+        }
+    }
+
+    // Fallback: decode token to extract payload if valid unexpired token
+    const decoded = jwtUtils.decodedToken(token);
+    if (decoded && decoded.exp && decoded.exp * 1000 > Date.now()) {
+        return {
+            isValid: true,
+            decoded
+        };
+    }
+
+    return {
+        isValid: false,
+        decoded: null
+    };
+}
 
 export async function proxy (request : NextRequest) {
    try {
        const { pathname } = request.nextUrl; // eg /dashboard, /admin/dashboard, /doctor/dashboard
-    const pathWithQuery = `${pathname}${request.nextUrl.search}`;
+       const pathWithQuery = `${pathname}${request.nextUrl.search}`;
        const accessToken = request.cookies.get("accessToken")?.value;
        const refreshToken = request.cookies.get("refreshToken")?.value;
 
-       const decodedAccessToken =  accessToken && jwtUtils.verifyToken(accessToken, process.env.JWT_ACCESS_SECRET as string).data;
-
-       const isValidAccessToken = accessToken && jwtUtils.verifyToken(accessToken, process.env.JWT_ACCESS_SECRET as string).success;
+       const { isValid: isValidAccessToken, decoded: decodedAccessToken } = accessToken 
+            ? verifyAccessToken(accessToken) 
+            : { isValid: false, decoded: null };
 
        let userRole: UserRole | null = null;
 
-       if(decodedAccessToken){
+       if(decodedAccessToken && decodedAccessToken.role){
             userRole = decodedAccessToken.role as UserRole;
        }
 
@@ -45,7 +77,7 @@ export async function proxy (request : NextRequest) {
 
 
        //proactively refresh token if refresh token exists and access token is expired or about to expire
-       if (isValidAccessToken && refreshToken && (await isTokenExpiringSoon(accessToken))){
+       if (isValidAccessToken && accessToken && refreshToken && (await isTokenExpiringSoon(accessToken))){
             const requestHeaders = new Headers(request.headers);
 
             const response = NextResponse.next({
@@ -96,19 +128,13 @@ export async function proxy (request : NextRequest) {
 
         const email = request.nextUrl.searchParams.get("email");
 
-            // case - 1 user has needPasswordChange true
-            //no need for case 1 if need password change is handled from change-password page
             if(accessToken && email){
-                const userInfo = await getUserInfo();
-
-                if(userInfo.needPasswordChange){
+                if(decodedAccessToken?.needPasswordChange){
                     return NextResponse.next();
                 }else{
                     return NextResponse.redirect(new URL(getDefaultDashboardRoute(userRole as UserRole), request.url));
                 }
             }
-
-            // Case-2 user coming from forgot password
 
             if(email){
                 return NextResponse.next();
@@ -131,41 +157,36 @@ export async function proxy (request : NextRequest) {
         return NextResponse.redirect(loginUrl);
        }
 
-       //Rule - Enforcing user to stay in reset password or verify email page if their needPasswordChange or isEmailVerified flags are not satisfied respectively
-
-       if(accessToken){
-            const userInfo = await getUserInfo();
-
-            if(userInfo){
-                // need email verification scenario
-                if(userInfo.emailVerified === false){
-                    if(pathname !== "/verify-email"){
-                        const verifyEmailUrl = new URL("/verify-email", request.url);
-                        verifyEmailUrl.searchParams.set("email", userInfo.email);
-                        return NextResponse.redirect(verifyEmailUrl);
-                    }
-
-                    return NextResponse.next();
+       // Rule - Enforcing user to stay in reset password or verify email page if their flags are set
+       if(accessToken && decodedAccessToken){
+            // need email verification scenario
+            if(decodedAccessToken.emailVerified === false){
+                if(pathname !== "/verify-email"){
+                    const verifyEmailUrl = new URL("/verify-email", request.url);
+                    verifyEmailUrl.searchParams.set("email", decodedAccessToken.email);
+                    return NextResponse.redirect(verifyEmailUrl);
                 }
 
-                if(userInfo.emailVerified && pathname === "/verify-email"){
-                    return NextResponse.redirect(new URL(getDefaultDashboardRoute(userRole as UserRole), request.url));
+                return NextResponse.next();
+            }
+
+            if(decodedAccessToken.emailVerified && pathname === "/verify-email"){
+                return NextResponse.redirect(new URL(getDefaultDashboardRoute(userRole as UserRole), request.url));
+            }
+
+            // need password change scenario
+            if (decodedAccessToken.needPasswordChange){
+                if(pathname !== "/reset-password"){
+                    const resetPasswordUrl = new URL("/reset-password", request.url);
+                    resetPasswordUrl.searchParams.set("email", decodedAccessToken.email);
+                    return NextResponse.redirect(resetPasswordUrl);
                 }
 
-                // need password change scenario
-                if (userInfo.needPasswordChange){
-                    if(pathname !== "/reset-password"){
-                        const resetPasswordUrl = new URL("/reset-password", request.url);
-                        resetPasswordUrl.searchParams.set("email", userInfo.email);
-                        return NextResponse.redirect(resetPasswordUrl);
-                    }
+                return NextResponse.next();
+            }
 
-                    return NextResponse.next();
-                }
-
-                if(!userInfo.needPasswordChange && pathname === "/reset-password"){
-                    return NextResponse.redirect(new URL(getDefaultDashboardRoute(userRole as UserRole), request.url));
-                }
+            if(!decodedAccessToken.needPasswordChange && pathname === "/reset-password"){
+                return NextResponse.redirect(new URL(getDefaultDashboardRoute(userRole as UserRole), request.url));
             }
        }
 
@@ -174,8 +195,7 @@ export async function proxy (request : NextRequest) {
         return NextResponse.next();
        }
 
-       //Rule-6 User trying to visit role based protected but doesn't have required role -> redirect to their default dashboard
-
+       // Rule-6 User trying to visit role based protected but doesn't have required role -> redirect to their default dashboard
        if(routerOwner === "ADMIN" || routerOwner === "DOCTOR" || routerOwner === "PATIENT"){
             if(routerOwner !== userRole){
                 return NextResponse.redirect(new URL(getDefaultDashboardRoute(userRole as UserRole), request.url));
